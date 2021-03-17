@@ -9,9 +9,9 @@ class RemotePayeezyTest < Test::Unit::TestCase
     @amount = 100
     @reversal_id = "REV-#{SecureRandom.random_number(1000000)}"
     @options = {
-      :billing_address => address,
-      :merchant_ref => 'Store Purchase',
-      :ta_token => 'NOIW'
+      billing_address: address,
+      merchant_ref: 'Store Purchase',
+      ta_token: 'NOIW'
     }
     @options_mdd = {
       soft_descriptors: {
@@ -32,6 +32,14 @@ class RemotePayeezyTest < Test::Unit::TestCase
       is_scheduled: true,
       initiator: 'MERCHANT',
       auth_type_override: 'A'
+    }
+    @options_standardized_stored_credentials = {
+      stored_credential: {
+        network_transaction_id: 'abc123', # Not checked if initial_transaction == true; not valid if initial_transaction == false.
+        initial_transaction: true,
+        reason_type: 'recurring',
+        initiator: 'cardholder'
+      }
     }
   end
 
@@ -59,11 +67,13 @@ class RemotePayeezyTest < Test::Unit::TestCase
   def test_successful_purchase
     assert response = @gateway.purchase(@amount, @credit_card, @options)
     assert_match(/Transaction Normal/, response.message)
+    assert_equal '100', response.params['bank_resp_code']
+    assert_equal nil, response.error_code
     assert_success response
   end
 
   def test_successful_purchase_with_echeck
-    options = @options.merge({customer_id_type: '1', customer_id_number: '1', client_email: 'test@example.com'})
+    options = @options.merge({ customer_id_type: '1', customer_id_number: '1', client_email: 'test@example.com' })
     assert response = @gateway.purchase(@amount, @check, options)
     assert_match(/Transaction Normal/, response.message)
     assert_success response
@@ -81,11 +91,24 @@ class RemotePayeezyTest < Test::Unit::TestCase
     assert_success response
   end
 
+  def test_successful_purchase_with_standardized_stored_credentials
+    assert response = @gateway.purchase(@amount, @credit_card, @options.merge(@options_standardized_stored_credentials))
+    assert_match(/Transaction Normal/, response.message)
+    assert_success response
+  end
+
   def test_failed_purchase
     @amount = 501300
     assert response = @gateway.purchase(@amount, @credit_card, @options)
     assert_match(/Transaction not approved/, response.message)
     assert_failure response
+  end
+
+  def test_failed_purchase_with_insufficient_funds
+    assert response = @gateway.purchase(530200, @credit_card, @options)
+    assert_failure response
+    assert_equal '302', response.error_code
+    assert_match(/Insufficient Funds/, response.message)
   end
 
   def test_authorize_and_capture
@@ -119,7 +142,7 @@ class RemotePayeezyTest < Test::Unit::TestCase
     auth = @gateway.authorize(@amount, @credit_card, @options)
     assert_success auth
 
-    assert capture = @gateway.capture(@amount-1, auth.authorization)
+    assert capture = @gateway.capture(@amount - 1, auth.authorization)
     assert_success capture
   end
 
@@ -168,7 +191,7 @@ class RemotePayeezyTest < Test::Unit::TestCase
     purchase = @gateway.purchase(@amount, @credit_card, @options)
     assert_success purchase
 
-    assert refund = @gateway.refund(@amount-1, purchase.authorization)
+    assert refund = @gateway.refund(@amount - 1, purchase.authorization)
     assert_success refund
   end
 

@@ -21,11 +21,11 @@ module ActiveMerchant #:nodoc:
 
       self.supported_countries = %w(AD AT BE BG HR CY CZ DK EE FR DE GI GR GG HU IS IE IM IT JE LV LI LT LU MT MC NO PL PT RO SM SK ES SE CH GB)
       self.default_currency = 'EUR'
-      self.currencies_without_fractions = %w(CLP JPY KRW PYG VND)
-      self.currencies_with_three_decimal_places = %w(BHD JOD KWD OMR RSD TND)
+      self.currencies_without_fractions = %w(BIF CLP DJF GNF JPY KMF KRW PYG RWF VND VUV XAF XOF XPF)
+      self.currencies_with_three_decimal_places = %w(BHD IQD JOD KWD LYD OMR TND)
 
       self.money_format = :cents
-      self.supported_cardtypes = [:visa, :master, :maestro]
+      self.supported_cardtypes = %i[visa master maestro american_express]
 
       RESPONSE_MESSAGES = {
         '00' => 'Approved or completed successfully',
@@ -117,21 +117,23 @@ module ActiveMerchant #:nodoc:
         '96' => 'System malfunction',
         'R0' => 'Stop Payment Order',
         'R1' => 'Revocation of Authorisation Order',
-        'R3' => 'Revocation of all Authorisations Order'
+        'R3' => 'Revocation of all Authorisations Order',
+        '1A' => 'Strong Customer Authentication required'
       }
 
-      def initialize(options={})
+      def initialize(options = {})
         requires!(options, :merchant_id, :cipher_key)
         super
       end
 
-      def purchase(amount, payment_method, options={})
+      def purchase(amount, payment_method, options = {})
         post = {}
         add_invoice(post, amount, options)
         add_payment_method(post, payment_method)
         add_customer_data(post, options)
         add_email(post, options)
         add_3d_secure(post, options)
+        add_3ds_2_optional_fields(post, options)
         add_echo(post, options)
         add_submerchant_id(post, options)
         add_stored_credential(post, options)
@@ -140,22 +142,24 @@ module ActiveMerchant #:nodoc:
         commit(:purchase, post)
       end
 
-      def authorize(amount, payment_method, options={})
+      def authorize(amount, payment_method, options = {})
         post = {}
         add_invoice(post, amount, options)
         add_payment_method(post, payment_method)
         add_customer_data(post, options)
         add_email(post, options)
         add_3d_secure(post, options)
+        add_3ds_2_optional_fields(post, options)
         add_echo(post, options)
         add_submerchant_id(post, options)
         add_stored_credential(post, options)
         add_processor(post, options)
+        add_authorization_details(post, options)
 
         commit(:authorize, post)
       end
 
-      def capture(amount, authorization, options={})
+      def capture(amount, authorization, options = {})
         post = {}
         add_invoice(post, amount, options)
         add_reference(post, authorization)
@@ -167,7 +171,7 @@ module ActiveMerchant #:nodoc:
         commit(:capture, post)
       end
 
-      def void(authorization, options={})
+      def void(authorization, options = {})
         post = {}
         add_customer_data(post, options)
         reference_action = add_reference(post, authorization)
@@ -179,7 +183,7 @@ module ActiveMerchant #:nodoc:
         commit(:void, post, reference_action)
       end
 
-      def refund(amount, authorization, options={})
+      def refund(amount, authorization, options = {})
         post = {}
         add_invoice(post, amount, options)
         add_reference(post, authorization)
@@ -187,11 +191,17 @@ module ActiveMerchant #:nodoc:
         add_echo(post, options)
         add_submerchant_id(post, options)
         add_processor(post, options)
+        add_email(post, options)
 
-        commit(:refund, post)
+        if options[:referral_cft]
+          add_customer_name(post, options)
+          commit(:referral_cft, post)
+        else
+          commit(:refund, post)
+        end
       end
 
-      def credit(amount, payment_method, options={})
+      def credit(amount, payment_method, options = {})
         post = {}
         add_invoice(post, amount, options)
         add_payment_method(post, payment_method)
@@ -205,7 +215,7 @@ module ActiveMerchant #:nodoc:
         commit(:credit, post)
       end
 
-      def verify(credit_card, options={})
+      def verify(credit_card, options = {})
         MultiResponse.run(:use_first_response) do |r|
           r.process { authorize(100, credit_card, options) }
           r.process(:ignore_result) { void(r.authorization, options) }
@@ -220,6 +230,25 @@ module ActiveMerchant #:nodoc:
         transcript.
           gsub(%r((b1=)\d+), '\1[FILTERED]').
           gsub(%r((b5=)\d+), '\1[FILTERED]')
+      end
+
+      def add_3ds_2_optional_fields(post, options)
+        three_ds = options[:three_ds_2] || {}
+
+        if three_ds.has_key?(:optional)
+          three_ds[:optional].each do |key, value|
+            normalized_value = normalize(value)
+            next if normalized_value.nil?
+
+            if key == :'3ds_homephonecountry'
+              next unless options[:billing_address] && options[:billing_address][:phone]
+            end
+
+            post[key] = normalized_value unless post[key]
+          end
+        end
+
+        post
       end
 
       private
@@ -253,6 +282,7 @@ module ActiveMerchant #:nodoc:
         add_transaction_type(post, options)
         # if :transaction_type option is not passed, then check for :stored_credential options
         return unless (stored_credential = options[:stored_credential]) && options.dig(:transaction_type).nil?
+
         if stored_credential[:initiator] == 'merchant'
           case stored_credential[:reason_type]
           when 'recurring'
@@ -268,12 +298,12 @@ module ActiveMerchant #:nodoc:
       def add_customer_data(post, options)
         post[:d1] = options[:ip] || '127.0.0.1'
         if (billing_address = options[:billing_address])
-          post[:c5] = billing_address[:address1]
-          post[:c7] = billing_address[:city]
-          post[:c10] = billing_address[:zip]
-          post[:c8] = billing_address[:state]
-          post[:c9] = billing_address[:country]
-          post[:c2] = billing_address[:phone]
+          post[:c5]   = billing_address[:address1]  if billing_address[:address1]
+          post[:c7]   = billing_address[:city]      if billing_address[:city]
+          post[:c10]  = billing_address[:zip]       if billing_address[:zip]
+          post[:c8]   = billing_address[:state]     if billing_address[:state]
+          post[:c9]   = billing_address[:country]   if billing_address[:country]
+          post[:c2]   = billing_address[:phone]     if billing_address[:phone]
         end
       end
 
@@ -289,24 +319,29 @@ module ActiveMerchant #:nodoc:
         post[:c3] = options[:email] || 'unspecified@example.com'
       end
 
+      def add_customer_name(post, options)
+        post[:j5] = options[:first_name] if options[:first_name]
+        post[:j13] = options[:last_name] if options[:last_name]
+      end
+
       def add_3d_secure(post, options)
-        if options[:eci] && options[:xid]
+        if (options[:eci] && options[:xid]) || (options[:three_d_secure] && options[:three_d_secure][:version]&.start_with?('1'))
           add_3d_secure_1_data(post, options)
         elsif options[:execute_threed] && options[:three_ds_2]
           three_ds_2_options = options[:three_ds_2]
           browser_info = three_ds_2_options[:browser_info]
           post[:'3ds_initiate'] = options[:three_ds_initiate] || '01'
+          post[:f23] = options[:f23] if options[:f23]
           post[:'3ds_purchasedate'] = Time.now.utc.strftime('%Y%m%d%I%M%S')
           options.dig(:stored_credential, :initiator) == 'merchant' ? post[:'3ds_channel'] = '03' : post[:'3ds_channel'] = '02'
           post[:'3ds_redirect_url'] = three_ds_2_options[:notification_url]
           post[:'3ds_challengewindowsize'] = options[:three_ds_challenge_window_size] || '03'
-          post[:'3ds_version'] = options[:three_ds_version] if options[:three_ds_version]
           post[:d5] = browser_info[:user_agent]
-          post[:'3ds_transtype'] = options[:transaction_type] || '01'
+          post[:'3ds_transtype'] = options[:three_ds_transtype] || '01'
           post[:'3ds_browsertz'] = browser_info[:timezone]
           post[:'3ds_browserscreenwidth'] = browser_info[:width]
           post[:'3ds_browserscreenheight'] = browser_info[:height]
-          post[:'3ds_browsercolordepth'] = browser_info[:depth]
+          post[:'3ds_browsercolordepth'] = browser_info[:depth].to_s == '30' ? '32' : browser_info[:depth]
           post[:d6] = browser_info[:language]
           post[:'3ds_browserjavaenabled'] = browser_info[:java]
           post[:'3ds_browseracceptheader'] = browser_info[:accept_header]
@@ -324,7 +359,17 @@ module ActiveMerchant #:nodoc:
       end
 
       def add_3d_secure_1_data(post, options)
-        post[:i8] = build_i8(options[:eci], options[:cavv], options[:xid])
+        if three_d_secure_options = options[:three_d_secure]
+          post[:i8] = build_i8(
+            three_d_secure_options[:eci],
+            three_d_secure_options[:cavv],
+            three_d_secure_options[:xid]
+          )
+          post[:'3ds_version'] = three_d_secure_options[:version]&.start_with?('1') ? '1.0' : three_d_secure_options[:version]
+        else
+          post[:i8] = build_i8(options[:eci], options[:cavv], options[:xid])
+          post[:'3ds_version'] = options[:three_ds_version].nil? || options[:three_ds_version]&.start_with?('1') ? '1.0' : options[:three_ds_version]
+        end
       end
 
       def add_normalized_3d_secure_2_data(post, options)
@@ -334,11 +379,11 @@ module ActiveMerchant #:nodoc:
           three_d_secure_options[:eci],
           three_d_secure_options[:cavv]
         )
-        post[:'3ds_version'] = three_d_secure_options[:version]
+        post[:'3ds_version'] = three_d_secure_options[:version]&.start_with?('2') ? '2.0' : three_d_secure_options[:version]
         post[:'3ds_dstrxid'] = three_d_secure_options[:ds_transaction_id]
       end
 
-      def build_i8(eci, cavv=nil, xid=nil)
+      def build_i8(eci, cavv = nil, xid = nil)
         "#{eci}:#{cavv || 'none'}:#{xid || 'none'}"
       end
 
@@ -358,8 +403,13 @@ module ActiveMerchant #:nodoc:
       end
 
       def add_processor(post, options)
-        post[:r1] = options[:processor] || 'CREDORAX'
+        post[:r1] = options[:processor] if options[:processor]
         post[:r2] = options[:processor_merchant_id] if options[:processor_merchant_id]
+      end
+
+      def add_authorization_details(post, options)
+        post[:a10] = options[:authorization_type] if options[:authorization_type]
+        post[:a11] = options[:multiple_capture_count] if options[:multiple_capture_count]
       end
 
       ACTIONS = {
@@ -372,7 +422,8 @@ module ActiveMerchant #:nodoc:
         purchase_void: '7',
         refund_void: '8',
         capture_void: '9',
-        threeds_completion: '92'
+        threeds_completion: '92',
+        referral_cft: '34'
       }
 
       def commit(action, params, reference_action = nil)
@@ -383,7 +434,7 @@ module ActiveMerchant #:nodoc:
           success_from(response),
           message_from(response),
           response,
-          authorization: "#{response["Z1"]};#{response["Z4"]};#{response["A1"]};#{action}",
+          authorization: "#{response['Z1']};#{response['Z4']};#{response['A1']};#{action}",
           avs_result: AVSResult.new(code: response['Z9']),
           cvv_result: CVVResult.new(response['Z14']),
           test: test?
@@ -392,8 +443,10 @@ module ActiveMerchant #:nodoc:
 
       def sign_request(params)
         params = params.sort
-        params.each { |param| param[1].gsub!(/[<>()\\]/, ' ') }
-        values = params.map { |param| param[1].strip }
+        values = params.map do |param|
+          value = param[1].gsub(/[<>()\\]/, ' ')
+          value.strip
+        end
         Digest::MD5.hexdigest(values.join + @options[:cipher_key])
       end
 
