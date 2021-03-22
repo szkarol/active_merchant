@@ -133,13 +133,15 @@ module ActiveMerchant #:nodoc:
         add_creditcard(post, payment, options)
         add_customer(post, payment, options)
         add_customer_data(post, options)
+
         if options[:email]
           post[:metadata] = {}
           post[:metadata][:email] = options[:email]
         end
-        if options[:three_d_secure]
-          add_3d_secure_options(post, options)
-        end
+
+        add_3d_secure_options(post, options) if options[:three_d_secure]
+        post[:billing] = options[:billing] if options[:billing]
+
         post
       end
 
@@ -233,7 +235,7 @@ module ActiveMerchant #:nodoc:
 
         params.map do |key, value|
           next if value.to_s.blank?
-          
+
           if value.is_a?(Hash)
             h = {}
             value.each do |k, v|
