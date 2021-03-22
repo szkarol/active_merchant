@@ -124,6 +124,16 @@ class SecurionPayTest < Test::Unit::TestCase
     end.respond_with(successful_purchase_response)
   end
 
+  def test_client_data_submitted_with_billing_address
+    stub_comms(@gateway, :ssl_request) do
+      updated_options = @options.merge({ billing: { address: { country: 'PL' } } })
+      @gateway.purchase(@amount, @credit_card, updated_options)
+    end.check_request do |_method, _endpoint, data, _headers|
+      assert_match(/billing\[address\]\[country\]=PL/, data)
+      refute data.include?('metadata')
+    end.respond_with(successful_purchase_response)
+  end
+
   def test_successful_authorization
     @gateway.expects(:ssl_request).returns(successful_authorize_response)
 
